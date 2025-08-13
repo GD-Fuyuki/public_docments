@@ -1,7 +1,16 @@
 {
-  "name": "Terraform & Next.js Development (Custom)",
-  "build": {
-    "dockerfile": "Dockerfile"
+  "name": "Terraform & Next.js Development",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:18",
+  "features": {
+    "ghcr.io/devcontainers/features/terraform:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/aws-cli:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest"
+    }
   },
   "customizations": {
     "vscode": {
@@ -11,38 +20,20 @@
         "bradlc.vscode-tailwindcss",
         "esbenp.prettier-vscode",
         "ms-vscode.vscode-json",
-        "ms-azuretools.vscode-docker",
-        "ms-vscode-remote.remote-containers",
-        "github.copilot"
+        "ms-azuretools.vscode-docker"
       ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",
         "terraform.experimentalFeatures.validateOnSave": true,
-        "terraform.experimentalFeatures.prefillRequiredFields": true,
-        "terraform.indexing.enabled": true,
-        "editor.formatOnSave": true,
-        "[terraform]": {
-          "editor.defaultFormatter": "hashicorp.terraform",
-          "editor.formatOnSave": true
-        },
-        "[javascript]": {
-          "editor.defaultFormatter": "esbenp.prettier-vscode"
-        },
-        "[typescript]": {
-          "editor.defaultFormatter": "esbenp.prettier-vscode"
-        }
+        "terraform.experimentalFeatures.prefillRequiredFields": true
       }
     }
   },
-  "forwardPorts": [3000, 3001, 8080],
-  "postCreateCommand": "terraform --version && node --version && npm --version",
+  "forwardPorts": [3000, 3001],
+  "postCreateCommand": "npm install -g pnpm yarn && terraform --version && node --version",
   "remoteUser": "node",
   "mounts": [
     "source=${localWorkspaceFolder}/.terraform,target=/workspace/.terraform,type=bind",
-    "source=${localWorkspaceFolder}/.aws,target=/home/node/.aws,type=bind",
-    "source=${localWorkspaceFolder}/.env,target=/workspace/.env,type=bind"
-  ],
-  "containerEnv": {
-    "TF_PLUGIN_CACHE_DIR": "/home/node/.terraform.d/plugin-cache"
-  }
+    "source=${localWorkspaceFolder}/.aws,target=/home/node/.aws,type=bind"
+  ]
 }
