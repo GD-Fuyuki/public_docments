@@ -1,3 +1,24 @@
+resource "aws_ecr_repository" "nextjs_app" {
+  name                 = "${var.project_name}-${var.environment}"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+
+  tags = {
+    Name        = "${var.project_name}-${var.environment}"
+    Project     = var.project_name
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+# ECR Repository Policy (optional - allows pull from specific accounts)
 resource "aws_ecr_repository_policy" "nextjs_app_policy" {
   repository = aws_ecr_repository.nextjs_app.name
 
