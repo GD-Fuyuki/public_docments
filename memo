@@ -1,460 +1,232 @@
-# IAM Role for ECS Task Execution
-resource "aws_iam_role" "ecs_task_execution_role" {
-  name = "${var.project_name}-${var.environment}-ecs-task-execution-role"
+name: Deploy Next.js App to AWS ECS
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
-  })
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
 
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-ecs-task-execution-role"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "terraform"
-  }
-}
+env:
+  AWS_REGION: ap-northeast-1
 
-# Attach the Amazon ECS Task Execution Role Policy
-resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
-  role       = aws_iam_role.ecs_task_execution_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
+jobs:
+  # Build and Test Job (runs on all pushes and PRs)
+  build-and-test:
+    name: 'Build and Test'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
 
-# Additional policy for ECR access (if using private ECR)
-resource "aws_iam_role_policy" "ecs_task_execution_ecr_policy" {
-  name = "${var.project_name}-${var.environment}-ecs-ecr-policy"
-  role = aws_iam_role.ecs_task_execution_role.id
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
 
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage",
-          "ecr:GetAuthorizationToken"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
-        Resource = "${aws_cloudwatch_log_group.ecs_logs.arn}:*"
-      }
-    ]
-  })
-}
+    - name: Install dependencies
+      run: npm ci
 
-# IAM Role for ECS Task (application runtime role)
-resource "aws_iam_role" "ecs_task_role" {
-  name = "${var.project_name}-${var.environment}-ecs-task-role"
+    - name: Run tests
+      run: npm run test -- --passWithNoTests
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
-  })
+    - name: Build application
+      run: npm run build
 
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-ecs-task-role"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "terraform"
-  }
-}
+    - name: Run lint
+      run: npm run lint
 
-# Custom policy for the ECS Task Role (add your application-specific permissions here)
-resource "aws_iam_role_policy" "ecs_task_role_policy" {
-  name = "${var.project_name}-${var.environment}-ecs-task-policy"
-  role = aws_iam_role.ecs_task_role.id
+  # Deploy Job (only runs on main/develop branches)
+  deploy:
+    name: 'Deploy Application'
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
 
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject"
-        ]
-        Resource = "arn:aws:s3:::${var.project_name}-${var.environment}-*/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ssm:GetParameter",
-          "ssm:GetParameters",
-          "ssm:GetParametersByPath"
-        ]
-        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/*"
-      }
-    ]
-  })
-}
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-# Security Group for ECS Tasks
-resource "aws_security_group" "ecs_tasks" {
-  name        = "${var.project_name}-${var.environment}-ecs-tasks"
-  description = "Security group for ECS tasks"
-  vpc_id      = data.aws_vpc.default.id
+    - name: Set environment variables
+      run: |
+        if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+          echo "PROJECT_NAME=${{ vars.PROJECT_NAME || 'nextjs-app' }}" >> $GITHUB_ENV
+        else
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          echo "PROJECT_NAME=${{ vars.PROJECT_NAME || 'nextjs-app' }}" >> $GITHUB_ENV
+        fi
 
-  ingress {
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Next.js application port"
-  }
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "All outbound traffic"
-  }
+    - name: Get ECR repository URI
+      id: ecr-repo
+      run: |
+        REPO_URI=$(aws ecr describe-repositories \
+          --repository-names "${PROJECT_NAME}-${ENVIRONMENT}" \
+          --query 'repositories[0].repositoryUri' \
+          --output text \
+          --region ${{ env.AWS_REGION }})
+        echo "repository-uri=$REPO_URI" >> $GITHUB_OUTPUT
 
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-ecs-tasks"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "terraform"
-  }
-}
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
-# ECS Task Definition
-resource "aws_ecs_task_definition" "nextjs_app" {
-  family                   = "${var.project_name}-${var.environment}"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = var.ecs_cpu
-  memory                   = var.ecs_memory
-  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
-  task_role_arn           = aws_iam_role.ecs_task_role.arn
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ steps.ecr-repo.outputs.repository-uri }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Build and push image with multiple tags
+        docker buildx build \
+          --platform linux/amd64 \
+          --tag $ECR_REPOSITORY:$IMAGE_TAG \
+          --tag $ECR_REPOSITORY:latest \
+          --tag $ECR_REPOSITORY:${{ env.ENVIRONMENT }}-latest \
+          --push .
+        
+        echo "image=$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+        echo "latest-image=$ECR_REPOSITORY:latest" >> $GITHUB_OUTPUT
 
-  container_definitions = jsonencode([
-    {
-      name  = "${var.project_name}-container"
-      image = "${aws_ecr_repository.nextjs_app.repository_url}:latest"
-      
-      portMappings = [
-        {
-          containerPort = 3000
-          protocol      = "tcp"
-        }
-      ]
+    - name: Get ECS cluster and service info
+      id: ecs-info
+      run: |
+        CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}-cluster"
+        SERVICE_NAME="${PROJECT_NAME}-${ENVIRONMENT}-service"
+        
+        echo "cluster-name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+        echo "service-name=$SERVICE_NAME" >> $GITHUB_OUTPUT
 
-      environment = [
-        {
-          name  = "NODE_ENV"
-          value = var.environment == "prod" ? "production" : "development"
-        },
-        {
-          name  = "PORT"
-          value = "3000"
-        }
-      ]
+    - name: Update ECS service
+      run: |
+        echo "Updating ECS service..."
+        aws ecs update-service \
+          --cluster ${{ steps.ecs-info.outputs.cluster-name }} \
+          --service ${{ steps.ecs-info.outputs.service-name }} \
+          --force-new-deployment \
+          --region ${{ env.AWS_REGION }}
 
-      # Add secrets from AWS Systems Manager Parameter Store if needed
-      secrets = [
-        # {
-        #   name      = "DATABASE_URL"
-        #   valueFrom = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/database-url"
-        # }
-      ]
+    - name: Wait for service stability
+      run: |
+        echo "Waiting for service to become stable..."
+        aws ecs wait services-stable \
+          --cluster ${{ steps.ecs-info.outputs.cluster-name }} \
+          --services ${{ steps.ecs-info.outputs.service-name }} \
+          --region ${{ env.AWS_REGION }} \
+          --cli-read-timeout 900 \
+          --cli-connect-timeout 60
 
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.ecs_logs.name
-          awslogs-region        = var.aws_region
-          awslogs-stream-prefix = "ecs"
-        }
-      }
+    - name: Get deployment status
+      run: |
+        echo "Getting service status..."
+        aws ecs describe-services \
+          --cluster ${{ steps.ecs-info.outputs.cluster-name }} \
+          --services ${{ steps.ecs-info.outputs.service-name }} \
+          --region ${{ env.AWS_REGION }} \
+          --query 'services[0].{Status:status,RunningCount:runningCount,DesiredCount:desiredCount,TaskDefinition:taskDefinition}' \
+          --output table
 
-      healthCheck = {
-        command = [
-          "CMD-SHELL",
-          "curl -f http://localhost:3000/api/health || exit 1"
-        ]
-        interval    = 30
-        timeout     = 5
-        retries     = 3
-        startPeriod = 60
-      }
+    - name: Get service URL
+      id: service-url
+      run: |
+        # Get the load balancer DNS name if available
+        ALB_ARN=$(aws ecs describe-services \
+          --cluster ${{ steps.ecs-info.outputs.cluster-name }} \
+          --services ${{ steps.ecs-info.outputs.service-name }} \
+          --region ${{ env.AWS_REGION }} \
+          --query 'services[0].loadBalancers[0].targetGroupArn' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ "$ALB_ARN" != "" ] && [ "$ALB_ARN" != "None" ]; then
+          ALB_DNS=$(aws elbv2 describe-target-groups \
+            --target-group-arns $ALB_ARN \
+            --query 'TargetGroups[0].LoadBalancerArns[0]' \
+            --output text 2>/dev/null | xargs -I {} aws elbv2 describe-load-balancers \
+            --load-balancer-arns {} \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ "$ALB_DNS" != "" ] && [ "$ALB_DNS" != "None" ]; then
+            echo "service-url=http://$ALB_DNS" >> $GITHUB_OUTPUT
+            echo "✅ Application URL: http://$ALB_DNS"
+          else
+            echo "service-url=N/A" >> $GITHUB_OUTPUT
+            echo "⚠️ Could not determine application URL"
+          fi
+        else
+          echo "service-url=N/A" >> $GITHUB_OUTPUT
+          echo "⚠️ No load balancer found for service"
+        fi
 
-      essential = true
-    }
-  ])
+    - name: Deployment Summary
+      run: |
+        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Environment | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Image | ${{ steps.build-image.outputs.image }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Cluster | ${{ steps.ecs-info.outputs.cluster-name }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Service | ${{ steps.ecs-info.outputs.service-name }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Application URL | ${{ steps.service-url.outputs.service-url }} |" >> $GITHUB_STEP_SUMMARY
 
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-task"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "terraform"
-  }
-}
+  # Security Scan Job (optional)
+  security-scan:
+    name: 'Security Scan'
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
+    - name: Set environment variables
+      run: |
+        if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+          echo "PROJECT_NAME=${{ vars.PROJECT_NAME || 'nextjs-app' }}" >> $GITHUB_ENV
+        else
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          echo "PROJECT_NAME=${{ vars.PROJECT_NAME || 'nextjs-app' }}" >> $GITHUB_ENV
+        fi
 
-
-------------------------
-
-# Variables for ECS Service
-variable "desired_count" {
-  description = "Number of desired tasks"
-  type        = number
-  default     = 1
-}
-
-variable "max_capacity" {
-  description = "Maximum number of tasks for auto scaling"
-  type        = number
-  default     = 3
-}
-
-variable "min_capacity" {
-  description = "Minimum number of tasks for auto scaling"
-  type        = number
-  default     = 1
-}
-
-# Application Load Balancer
-resource "aws_lb" "main" {
-  name               = "${var.project_name}-${var.environment}-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = data.aws_subnets.default.ids
-
-  enable_deletion_protection = false
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-alb"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "terraform"
-  }
-}
-
-# Security Group for ALB
-resource "aws_security_group" "alb" {
-  name        = "${var.project_name}-${var.environment}-alb"
-  description = "Security group for Application Load Balancer"
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTP"
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTPS"
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "All outbound traffic"
-  }
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-alb"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "terraform"
-  }
-}
-
-# Update ECS tasks security group to allow traffic from ALB
-resource "aws_security_group_rule" "ecs_tasks_from_alb" {
-  type                     = "ingress"
-  from_port                = 3000
-  to_port                  = 3000
-  protocol                 = "tcp"
-  source_security_group_id = aws_security_group.alb.id
-  security_group_id        = aws_security_group.ecs_tasks.id
-}
-
-# Remove the broad ingress rule from the ECS tasks security group
-resource "aws_security_group_rule" "remove_broad_ingress" {
-  type        = "ingress"
-  from_port   = 3000
-  to_port     = 3000
-  protocol    = "tcp"
-  cidr_blocks = []
-  security_group_id = aws_security_group.ecs_tasks.id
-}
-
-# Target Group
-resource "aws_lb_target_group" "nextjs_app" {
-  name        = "${var.project_name}-${var.environment}-tg"
-  port        = 3000
-  protocol    = "HTTP"
-  vpc_id      = data.aws_vpc.default.id
-  target_type = "ip"
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    interval            = 30
-    matcher             = "200"
-    path                = "/api/health"
-    port                = "traffic-port"
-    protocol            = "HTTP"
-    timeout             = 5
-    unhealthy_threshold = 2
-  }
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-tg"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "terraform"
-  }
-}
-
-# ALB Listener
-resource "aws_lb_listener" "nextjs_app" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = "80"
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.nextjs_app.arn
-  }
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-listener"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "terraform"
-  }
-}
-
-# ECS Service
-resource "aws_ecs_service" "nextjs_app" {
-  name            = "${var.project_name}-${var.environment}-service"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.nextjs_app.arn
-  desired_count   = var.desired_count
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    security_groups  = [aws_security_group.ecs_tasks.id]
-    subnets          = data.aws_subnets.default.ids
-    assign_public_ip = true
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.nextjs_app.arn
-    container_name   = "${var.project_name}-container"
-    container_port   = 3000
-  }
-
-  depends_on = [aws_lb_listener.nextjs_app]
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-service"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "terraform"
-  }
-}
-
-# Auto Scaling Target
-resource "aws_appautoscaling_target" "ecs_target" {
-  max_capacity       = var.max_capacity
-  min_capacity       = var.min_capacity
-  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.nextjs_app.name}"
-  scalable_dimension = "ecs:service:DesiredCount"
-  service_namespace  = "ecs"
-}
-
-# Auto Scaling Policy - CPU
-resource "aws_appautoscaling_policy" "ecs_policy_cpu" {
-  name               = "${var.project_name}-${var.environment}-cpu-scaling"
-  policy_type        = "TargetTrackingScaling"
-  resource_id        = aws_appautoscaling_target.ecs_target.resource_id
-  scalable_dimension = aws_appautoscaling_target.ecs_target.scalable_dimension
-  service_namespace  = aws_appautoscaling_target.ecs_target.service_namespace
-
-  target_tracking_scaling_policy_configuration {
-    predefined_metric_specification {
-      predefined_metric_type = "ECSServiceAverageCPUUtilization"
-    }
-    target_value       = 70.0
-    scale_in_cooldown  = 300
-    scale_out_cooldown = 300
-  }
-}
-
-# Auto Scaling Policy - Memory
-resource "aws_appautoscaling_policy" "ecs_policy_memory" {
-  name               = "${var.project_name}-${var.environment}-memory-scaling"
-  policy_type        = "TargetTrackingScaling"
-  resource_id        = aws_appautoscaling_target.ecs_target.resource_id
-  scalable_dimension = aws_appautoscaling_target.ecs_target.scalable_dimension
-  service_namespace  = aws_appautoscaling_target.ecs_target.service_namespace
-
-  target_tracking_scaling_policy_configuration {
-    predefined_metric_specification {
-      predefined_metric_type = "ECSServiceAverageMemoryUtilization"
-    }
-    target_value       = 80.0
-    scale_in_cooldown  = 300
-    scale_out_cooldown = 300
-  }
-}
-
-# Outputs for ECS Service
-output "alb_dns_name" {
-  description = "DNS name of the load balancer"
-  value       = aws_lb.main.dns_name
-}
-
-output "alb_zone_id" {
-  description = "Zone ID of the load balancer"
-  value       = aws_lb.main.zone_id
-}
-
-output "ecs_service_name" {
-  description = "Name of the ECS service"
-  value       = aws_ecs_service.nextjs_app.name
-}
-
-output "application_url" {
-  description = "URL to access the application"
-  value       = "http://${aws_lb.main.dns_name}"
-}
+    - name: Run ECR image scan
+      run: |
+        REPO_NAME="${PROJECT_NAME}-${ENVIRONMENT}"
+        
+        echo "Starting image scan for repository: $REPO_NAME"
+        
+        # Start image scan
+        aws ecr start-image-scan \
+          --repository-name $REPO_NAME \
+          --image-id imageTag=latest \
+          --region ${{ env.AWS_REGION }} || echo "Scan already in progress or recently completed"
+        
+        # Wait a bit for scan to complete
+        sleep 30
+        
+        # Get scan results
+        echo "Getting scan results..."
+        aws ecr describe-image-scan-findings \
+          --repository-name $REPO_NAME \
+          --image-id imageTag=latest \
+          --region ${{ env.AWS_REGION }} \
+          --query 'imageScanFindingsSummary.findingCounts' \
+          --output table || echo "Scan still in progress or no findings available"
